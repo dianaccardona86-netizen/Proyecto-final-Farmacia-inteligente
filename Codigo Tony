@@ -1,0 +1,291 @@
+# ==========================================
+# FARMACIA INTELIGENTE
+# ESP32
+# ==========================================
+
+import network
+import urequests
+import time
+import dht
+from machine import Pin, ADC, PWM
+
+# ==========================================
+# WIFI
+# ==========================================
+
+SSID = "OPPO Reno7"
+PASSWORD = "NixCardona123"
+
+SERVER = "http://10.165.82.61:5000/update"
+
+# ==========================================
+# UMBRALES
+# ==========================================
+
+TEMP_MAX = 35
+AIRE_MAX = 1400
+LUZ_MIN = 1500
+
+# ==========================================
+# SENSORES
+# ==========================================
+
+dht11 = dht.DHT11(Pin(4))
+
+lm35 = ADC(Pin(34))
+lm35.atten(ADC.ATTN_11DB)
+
+mq135 = ADC(Pin(35))
+mq135.atten(ADC.ATTN_11DB)
+
+cjmcu = ADC(Pin(32))
+cjmcu.atten(ADC.ATTN_11DB)
+
+# ==========================================
+# ACTUADORES
+# ==========================================
+
+buzzer = Pin(18, Pin.OUT)
+
+boton = Pin(27, Pin.IN, Pin.PULL_UP)
+
+servo_puerta = PWM(Pin(26), freq=50)
+servo_vent = PWM(Pin(14), freq=50)
+
+# RGB ANODO COMUN
+rojo = Pin(19, Pin.OUT)
+verde = Pin(23, Pin.OUT)
+azul = Pin(25, Pin.OUT)
+
+# ==========================================
+# VARIABLE GLOBAL DEL RGB
+# ==========================================
+
+rgb_actual = "Verde"
+
+# ==========================================
+# FUNCIONES
+# ==========================================
+
+def mover_servo(servo, angulo):
+    duty = int((angulo / 180) * 102 + 26)
+    servo.duty(duty)
+
+def color_verde():
+    global rgb_actual
+
+    rojo.on()
+    verde.on()
+    azul.off()
+
+    rgb_actual = "Verde"
+
+def color_rojo():
+    global rgb_actual
+
+    rojo.off()
+    verde.on()
+    azul.on()
+
+    rgb_actual = "Rojo"
+
+def color_azul():
+    global rgb_actual
+
+    rojo.on()
+    verde.off()
+    azul.on()
+
+    rgb_actual = "Azul"
+
+# ==========================================
+# ESTADO INICIAL
+# ==========================================
+
+mover_servo(servo_puerta, 0)
+mover_servo(servo_vent, 0)
+
+buzzer.off()
+color_verde()
+
+# ==========================================
+# CONEXION WIFI
+# ==========================================
+
+wifi = network.WLAN(network.STA_IF)
+
+wifi.active(False)
+time.sleep(1)
+
+wifi.active(True)
+time.sleep(1)
+
+print("Conectando WiFi...")
+
+wifi.connect(SSID, PASSWORD)
+
+timeout = 15
+
+while not wifi.isconnected() and timeout > 0:
+    print("Esperando conexión...")
+    time.sleep(1)
+    timeout -= 1
+
+if wifi.isconnected():
+    print("WiFi conectado")
+    print(wifi.ifconfig())
+else:
+    print("No fue posible conectar al WiFi")
+
+# ==========================================
+# LOOP PRINCIPAL
+# ==========================================
+
+while True:
+
+    try:
+
+        # ==========================
+        # DHT11
+        # ==========================
+
+        dht11.measure()
+
+        temp_amb = dht11.temperature()
+        humedad = dht11.humidity()
+
+        # ==========================
+        # LM35
+        # ==========================
+
+        voltaje = lm35.read() * 3.3 / 4095
+        temp_gab = voltaje * 100
+
+        # ==========================
+        # MQ135
+        # ==========================
+
+        aire = mq135.read()
+
+        # ==========================
+        # CJMCU-101
+        # ==========================
+
+        iluminacion = cjmcu.read()
+
+        puerta = "Cerrada"
+        ventilacion = "Apagada"
+        alarma = "Normal"
+
+        # ==========================
+        # BOTON
+        # ==========================
+
+        if boton.value() == 0:
+
+            mover_servo(servo_puerta, 90)
+
+            puerta = "Abierta"
+
+            color_azul()
+
+            time.sleep(3)
+
+            mover_servo(servo_puerta, 0)
+
+        # ==========================
+        # VENTILACION
+        # ==========================
+
+        if aire > AIRE_MAX:
+
+            mover_servo(servo_vent, 90)
+
+            ventilacion = "Encendida"
+
+        else:
+
+            mover_servo(servo_vent, 0)
+            
+        if temp_gab > TEMP_MAX:
+            print("ALARMA POR TEMPERATURA")
+
+        if aire > AIRE_MAX:
+            print("ALARMA POR CALIDAD DE AIRE")
+
+        if iluminacion < LUZ_MIN:
+            print("ALARMA POR ILUMINACION")
+
+        # ==========================
+        # ALARMAS
+        # ==========================
+
+        if temp_gab > TEMP_MAX or aire > AIRE_MAX or iluminacion < LUZ_MIN:
+
+            buzzer.on()
+
+            color_rojo()
+
+            alarma = "Activa"
+
+        else:
+
+            if puerta != "Abierta":
+
+                buzzer.off()
+
+                color_verde()
+
+        # ==========================
+        # DATOS PARA FLASK
+        # ==========================
+
+        datos = {
+
+            "temp_amb": round(temp_amb, 1),
+            "humedad": humedad,
+            "temp_gab": round(temp_gab, 1),
+            "aire": aire,
+            "luz": iluminacion,
+            "puerta": puerta,
+            "ventilacion": ventilacion,
+            "rgb": rgb_actual,
+            "alarma": alarma,
+            "sistema": "Conectado"
+
+        }
+
+        # ==========================
+        # ENVIO A FLASK
+        # ==========================
+
+        respuesta = urequests.post(
+            SERVER,
+            json=datos
+        )
+
+        respuesta.close()
+
+        # ==========================
+        # MONITOR SERIAL
+        # ==========================
+
+        print("============================")
+        print("Temp Amb:", temp_amb)
+        print("Humedad:", humedad)
+        print("Temp Gab:", round(temp_gab, 1))
+        print("Aire:", aire)
+        print("Luz:", iluminacion)
+        print("Puerta:", puerta)
+        print("Vent:", ventilacion)
+        print("RGB REAL:", rgb_actual)
+        print("Alarma:", alarma)
+        print("============================")
+
+        time.sleep(2)
+
+    except Exception as e:
+
+        print("Error:", e)
+
+        time.sleep(2)
